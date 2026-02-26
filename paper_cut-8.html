@@ -1,0 +1,359 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <title>Digital Paper Cutting</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/p5.js/1.9.0/p5.min.js"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #f5f0e8;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: #333;
+    }
+    #title {
+      font-size: 22px;
+      letter-spacing: 4px;
+      margin-bottom: 14px;
+      color: #c0392b;
+      text-shadow: 0 0 8px #dc143c44;
+    }
+    #controls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+      flex-wrap: wrap;
+      justify-content: center;
+    }
+    #modeControls {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    button {
+      padding: 8px 18px;
+      border: 1.5px solid #dc143c;
+      border-radius: 20px;
+      background: transparent;
+      color: #c0392b;
+      font-size: 13px;
+      cursor: pointer;
+      letter-spacing: 1px;
+      transition: all 0.2s;
+    }
+    button:hover { background: #dc143c33; color: #fff; }
+    button.active { background: #dc143c; color: #fff; }
+    #hint {
+      margin-top: 12px;
+      font-size: 13px;
+      color: #888;
+      letter-spacing: 1px;
+    }
+    #canvas-container { display: flex; justify-content: center; }
+    canvas { border-radius: 8px; box-shadow: 0 0 40px #dc143c33; }
+  </style>
+</head>
+<body>
+  <video id="camVideo" autoplay playsinline style="display:none"></video>
+  <div id="title">✂ Paper Cutting</div>
+  <div class="control-group-label">Pattern Mode</div>
+  <div id="modeControls">
+    <button id="mode6Btn" class="active">❄ Hexagon (1/6)</button>
+    <button id="mode4Btn">✦ Square (1/4)</button>
+    <button id="mode8Btn">⭐ Octagon (1/8)</button>
+  </div>
+  <div class="control-group-label">Actions</div>
+  <div id="controls">
+    <button id="foldBtn" class="active">📄 Fold (Cut)</button>
+    <button id="unfoldBtn">🌸 Unfold (Preview)</button>
+    <button id="resetBtn">🗑 Reset</button>
+    <button id="camBtn">📷 Window Mode</button>
+  </div>
+  <div id="canvas-container"></div>
+  <div id="hint">Drag inside the red sector to cut. Multiple cuts supported.</div>
+  <script>
+  let camStream = null;
+  let camActive = false;
+  const video = document.getElementById("camVideo");
+
+  document.getElementById("camBtn").addEventListener("click", async () => {
+    if (!camActive) {
+      try {
+        camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        video.srcObject = camStream;
+        camActive = true;
+        document.getElementById("camBtn").classList.add("active");
+        document.getElementById("camBtn").textContent = "🪟 Close Window";
+      } catch(e) {
+        alert("Camera access denied: " + e.message);
+      }
+    } else {
+      if (camStream) camStream.getTracks().forEach(t => t.stop());
+      video.srcObject = null;
+      camActive = false;
+      document.getElementById("camBtn").classList.remove("active");
+      document.getElementById("camBtn").textContent = "📷 Window Mode";
+    }
+  });
+
+  new p5(function(p) {
+    const RADIUS_FOLDED   = 350;
+    const RADIUS_UNFOLDED = 250;
+    const PAPER_COLOR = [220, 20, 60];
+
+    let RADIUS = RADIUS_FOLDED;
+
+    // Mode: 6 or 4
+    let numSectors  = 6;
+    let sectorAngle = 60;   // degrees per sector
+    // Display rotation so sector is vertically symmetric (points up)
+    // center of sector = sectorAngle/2; target center = -90 => rotation = -90 - sectorAngle/2
+    let displayRot  = -120; // for 6-sector: -90 - 30 = -120
+
+    let cuts       = [];
+    let currentCut = [];
+    let isCutting  = false;
+    let foldedState = true;
+
+    let unfoldProgress = 0;
+    let animating = false;
+
+    function setMode(sectors) {
+      numSectors  = sectors;
+      sectorAngle = 360 / sectors;
+      displayRot  = -90 - sectorAngle / 2;
+      // Reset everything
+      cuts = []; currentCut = [];
+      isCutting = false; foldedState = true;
+      unfoldProgress = 0; animating = false;
+      RADIUS = RADIUS_FOLDED;
+      document.getElementById("foldBtn").classList.add("active");
+      document.getElementById("unfoldBtn").classList.remove("active");
+      document.getElementById("mode6Btn").classList.toggle("active", sectors === 6);
+      document.getElementById("mode4Btn").classList.toggle("active", sectors === 4);
+      document.getElementById("mode8Btn").classList.toggle("active", sectors === 8);
+    }
+
+    p.setup = function() {
+      let cnv = p.createCanvas(650, 650);
+      cnv.parent('canvas-container');
+      p.angleMode(p.DEGREES);
+
+      document.getElementById("mode6Btn").addEventListener("click", () => setMode(6));
+      document.getElementById("mode4Btn").addEventListener("click", () => setMode(4));
+      document.getElementById("mode8Btn").addEventListener("click", () => setMode(8));
+
+      document.getElementById("foldBtn").addEventListener("click", () => {
+        if (!foldedState) startAnim(false);
+      });
+      document.getElementById("unfoldBtn").addEventListener("click", () => {
+        if (foldedState) startAnim(true);
+      });
+      document.getElementById("resetBtn").addEventListener("click", () => {
+        cuts = []; currentCut = [];
+        isCutting = false; foldedState = true;
+        unfoldProgress = 0; animating = false;
+        document.getElementById("foldBtn").classList.add("active");
+        document.getElementById("unfoldBtn").classList.remove("active");
+      });
+    };
+
+    function startAnim(toUnfold) {
+      animating = true;
+      if (toUnfold) {
+        foldedState = false;
+        unfoldProgress = 0;
+      } else {
+        unfoldProgress = 1;
+      }
+      document.getElementById("foldBtn").classList.toggle("active", !toUnfold);
+      document.getElementById("unfoldBtn").classList.toggle("active", toUnfold);
+    }
+
+    p.draw = function() {
+      p.background(245, 240, 232);
+      // Draw camera feed as background if active
+      if (camActive && video.readyState >= 2) {
+        p.push();
+        p.translate(p.width, 0);
+        p.scale(-1, 1); // mirror
+        let vw = video.videoWidth, vh = video.videoHeight;
+        let scale = Math.max(p.width / vw, p.height / vh);
+        let dw = vw * scale, dh = vh * scale;
+        p.drawingContext.drawImage(video, (p.width - dw)/2, (p.height - dh)/2, dw, dh);
+        p.pop();
+        // frosted glass overlay
+        p.fill(245, 240, 232, 60);
+        p.noStroke();
+        p.rect(0, 0, p.width, p.height);
+      }
+
+      if (animating) {
+        if (!foldedState) {
+          unfoldProgress = p.min(1, unfoldProgress + 0.04);
+          if (unfoldProgress >= 1) { animating = false; unfoldProgress = 1; }
+        } else {
+          unfoldProgress = p.max(0, unfoldProgress - 0.04);
+          if (unfoldProgress <= 0) { animating = false; unfoldProgress = 0; foldedState = true; }
+        }
+      } else {
+        unfoldProgress = foldedState ? 0 : 1;
+      }
+
+      let offsetY = p.lerp(80, 0, unfoldProgress);
+      p.translate(p.width / 2, p.height / 2 + offsetY);
+      RADIUS = p.lerp(RADIUS_FOLDED, RADIUS_UNFOLDED, unfoldProgress);
+
+      if (unfoldProgress < 0.01) {
+        drawFolded();
+      } else if (unfoldProgress > 0.99) {
+        drawUnfolded(1);
+      } else {
+        drawUnfolded(unfoldProgress);
+      }
+    };
+
+    function drawFolded() {
+      drawGuideCircle();
+      p.push();
+      p.rotate(displayRot);
+      drawSectorWithCuts(1);
+      if (currentCut.length > 1) {
+        p.stroke(80, 160, 255, 200);
+        p.strokeWeight(2.5);
+        p.noFill();
+        p.beginShape();
+        for (let v of currentCut) p.vertex(v.x, v.y);
+        p.endShape();
+      }
+      p.pop();
+    }
+
+    function drawUnfolded(progress) {
+      p.push();
+      p.drawingContext.shadowColor = "rgba(220,20,60,0.3)";
+      p.drawingContext.shadowBlur = 30;
+      let count = Math.round(progress * numSectors);
+      for (let i = 0; i < numSectors; i++) {
+        let alpha = i < count ? 1 : (i === count ? (progress * numSectors - count) : 0);
+        if (alpha <= 0) continue;
+        p.push();
+        // Each sector rotated by i*sectorAngle, offset by displayRot so they line up
+        p.rotate(i * sectorAngle + displayRot);
+        drawSectorWithCuts(alpha);
+        p.pop();
+      }
+      p.pop();
+    }
+
+    function drawSectorWithCuts(alpha) {
+      let c = [...PAPER_COLOR, Math.round(alpha * 255)];
+      p.fill(c);
+      p.noStroke();
+      p.beginShape();
+      p.vertex(0, 0);
+      for (let a = 0; a <= sectorAngle; a++) {
+        p.vertex(RADIUS * p.cos(a), RADIUS * p.sin(a));
+      }
+      // Scale cut coords from recorded radius to current RADIUS
+      let scale = RADIUS / RADIUS_FOLDED;
+      for (let cut of cuts) {
+        if (cut.length < 3) continue;
+        p.beginContour();
+        for (let i = cut.length - 1; i >= 0; i--) {
+          p.vertex(cut[i].x * scale, cut[i].y * scale);
+        }
+        p.endContour();
+      }
+      p.endShape(p.CLOSE);
+
+      if (alpha > 0.5) {
+        p.stroke(0, 0, 0, 20);
+        p.strokeWeight(1);
+        p.noFill();
+        p.beginShape();
+        p.vertex(0, 0);
+        for (let a = 0; a <= sectorAngle; a++) {
+          p.vertex(RADIUS * p.cos(a), RADIUS * p.sin(a));
+        }
+        p.endShape(p.CLOSE);
+      }
+    }
+
+    function drawGuideCircle() {
+      p.noFill();
+      p.stroke(0, 0, 0, 30);
+      p.strokeWeight(1);
+      p.ellipse(0, 0, RADIUS * 2);
+      p.push();
+      p.rotate(displayRot);
+      p.stroke(0, 0, 0, 60);
+      p.strokeWeight(1);
+      p.line(0, 0, RADIUS + 10, 0);
+      p.rotate(sectorAngle);
+      p.line(0, 0, RADIUS + 10, 0);
+      p.pop();
+      p.fill(0, 0, 0, 120);
+      p.noStroke();
+      p.textAlign(p.CENTER);
+      p.textSize(12);
+      p.text("Drag to cut (1/" + numSectors + ")", 0, -RADIUS - 18);
+    }
+
+    // ── Mouse ─────────────────────────────────────────────────────
+
+    function getLocalMouse() {
+      let offsetY = p.lerp(80, 0, unfoldProgress);
+      let mx = p.mouseX - p.width / 2;
+      let my = p.mouseY - p.height / 2 - offsetY;
+      // Inverse of displayRot
+      let ang = -displayRot;
+      let cosA = p.cos(ang), sinA = p.sin(ang);
+      return p.createVector(
+        mx * cosA - my * sinA,
+        mx * sinA + my * cosA
+      );
+    }
+
+    function isInSector(v) {
+      let d = v.mag();
+      let a = p.atan2(v.y, v.x);
+      return d <= RADIUS && a >= 0 && a <= sectorAngle;
+    }
+
+    p.mousePressed = function() {
+      if (!foldedState || animating) return;
+      if (p.mouseY < 0 || p.mouseY > p.height) return;
+      let lv = getLocalMouse();
+      if (isInSector(lv)) {
+        isCutting = true;
+        currentCut = [lv];
+      }
+    };
+
+    p.mouseDragged = function() {
+      if (!isCutting || !foldedState) return;
+      let lv = getLocalMouse();
+      let last = currentCut[currentCut.length - 1];
+      if (p.dist(lv.x, lv.y, last.x, last.y) > 3) {
+        currentCut.push(lv);
+      }
+    };
+
+    p.mouseReleased = function() {
+      if (isCutting && currentCut.length > 3) {
+        currentCut.push(currentCut[0].copy());
+        cuts.push([...currentCut]);
+      }
+      currentCut = [];
+      isCutting = false;
+    };
+  });
+  </script>
+</body>
+</html>
